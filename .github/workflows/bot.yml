@@ -1,27 +1,28 @@
-name: BTC Levels Bot
-
 on:
   schedule:
-    - cron: '0 * * * *'      # каждый час в 00 минут
-  workflow_dispatch:         # ручной запуск кнопкой
+    - cron: "0 * * * *"  # каждый час в начале часа (UTC)
+  workflow_dispatch:
 
 jobs:
-  run:
+  send_levels:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - name: Установка Python
-        uses: actions/setup-python@v5
+      - name: Set up Python
+        uses: actions/setup-python@v4
         with:
-          python-version: '3.11'
+          python-version: "3.11"
 
-      - name: Установка библиотек
+      - name: Install dependencies
         run: |
-          pip install requests python-telegram-bot==20.7
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
 
-      - name: Запуск бота
+      - name: Run bot (one-shot)
         env:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           CHAT_ID: ${{ secrets.CHAT_ID }}
-        run: python main.py
+        run: |
+          python main.py
