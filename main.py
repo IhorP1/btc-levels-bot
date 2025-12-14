@@ -1,6 +1,10 @@
 import os
 import logging
+import time
+import sys
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 from telegram import Bot
 from telegram.error import TelegramError
 
@@ -12,8 +16,8 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 
 if not TELEGRAM_TOKEN or not CHAT_ID:
-    logger.error("ОШИБКА: Добавь TELEGRAM_TOKEN и CHAT_ID в Secrets!")
-    exit(1)
+    logger.error("ОШИБКА: Добавь TELEGRAM_TOKEN и CHAT_ID в окружение/Secrets!")
+    sys.exit(1)
 
 # Показываем минимальную проверку — длину токена и сам CHAT_ID (не выводим сам токен)
 logger.info("TELEGRAM_TOKEN задан (length=%d). CHAT_ID=%s", len(TELEGRAM_TOKEN), CHAT_ID)
@@ -32,10 +36,18 @@ try:
     logger.info("Бот валиден: %s (id=%s)", me.username if hasattr(me, "username") else me, getattr(me, "id", ""))
 except TelegramError as e:
     logger.exception("Не удалось запросить getMe — проверь TELEGRAM_TOKEN: %s", e)
-    exit(1)
+    sys.exit(1)
 except Exception as e:
     logger.exception("Неожиданная ошибка при getMe: %s", e)
-    exit(1)
+    sys.exit(1)
+
+def create_session_with_retries(total_retries=3, backoff_factor=0.3, status_forcelist=(500, 502, 503, 504)):
+    session = requests.Session()
+    retries = Retry(total=total_retries, backoff_factor=backoff_factor, status_forcelist=status_forcelist, allowed_methods=frozenset(['GET', 'POST']))
+    adapter = HTTPAdapter(max_retries=retries)
+    session.mount("https://", adapter)
+    session.mount("http://", adapter)
+    return session
 
 def send(text):
     try:
@@ -46,12 +58,20 @@ def send(text):
     except Exception as e:
         logger.exception("Ошибка отправки (прочее): %s", e)
 
-def get_btc_levels():
+def get_btc_levels(session=None):
+    session = session or create_session_with_retries()
     try:
-        url = "https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd&include_24hr_change=true&include_24hr_vol=true"
-        resp = requests.get(url, timeout=10)
+        url = "https://api.coingecko.com/api/v3/simple/price"
+        params = {
+            "ids": "bitcoin",
+            "vs_currencies": "usd",
+            "include_24hr_change": "true",
+            "include_24hr_vol": "true"
+        }
+        resp = session.get(url, params=params, timeout=10)
         resp.raise_for_status()
-        data = resp.json().get("bitcoin")
+        resp_json = resp.json()
+        data = resp_json.get("bitcoin")
         if not data:
             raise ValueError("Нет ключа 'bitcoin' в ответе API")
 
@@ -68,7 +88,7 @@ def get_btc_levels():
         poc = round(price)
         fvg = f"{round(price * 0.985)} — {round(price * 1.015)}"
 
-        # Форматируем объём: если очень большой, показываем в миллиардах
+        # Форматируем объём: если очень большой, показываем в миллиардах/миллионах
         vol_text = f"${volume:,.0f}"
         try:
             if volume >= 1_000_000_000:
@@ -78,21 +98,27 @@ def get_btc_levels():
         except Exception:
             vol_text = f"${volume}"
 
-        signal = f"""
-УРОВНИ BTC — ОБНОВЛЕНО
+        # Решение Grok (упрощённо)
+        try:
+            change_val = float(change)
+        except Exception:
+            change_val = 0.0
 
-Цена: ${price:,.0f}
-Изменение 24ч: {change:+.2f}%
-Объём: {vol_text}
+        grok = "LONG bias — ждём отскок" if change_val > -1 else "Осторожно — возможен пробой вниз"
 
-• Поддержка: ${support:,.0f}
-• Сопротивление: ${resistance:,.0f}
-• POC: ${poc:,.0f}
-• FVG зона: {fvg}
-
-Grok: {"LONG bias — ждём отскок" if change > -1 else "Осторожно — возможен пробой вниз"}
-"""
+        signal = (
+            "УРОВНИ BTC — ОБНОВЛЕНО\n\n"
+            f"Цена: ${price:,.0f}\n"
+            f"Изменение 24ч: {change_val:+.2f}%\n"
+            f"Объём: {vol_text}\n\n"
+            f"• Поддержка: ${support:,.0f}\n"
+            f"• Сопротивление: ${resistance:,.0f}\n"
+            f"• POC: ${poc:,.0f}\n"
+            f"• FVG зона: {fvg}\n\n"
+            f"Grok: {grok}"
+        )
         send(signal)
+        return True
     except Exception as e:
         logger.exception("Ошибка получения или обработки данных: %s", e)
         # Попробуем отправить сообщение об ошибке (если бот валиден)
@@ -100,9 +126,30 @@ Grok: {"LONG bias — ждём отскок" if change > -1 else "Осторож
             send(f"Ошибка данных: {e}")
         except Exception:
             logger.error("Не удалось отправить сообщение об ошибке.")
+        return False
 
-# При запуске — сразу отправляем уровни
-logger.info("Бот запущен — отправляю текущие уровни BTC...")
-get_btc_levels()
+def main():
+    # INTERVAL_SECONDS: если задан — скрипт будет работать в цикле с паузой INTERVAL_SECONDS
+    interval = os.getenv("INTERVAL_SECONDS")
+    session = create_session_with_retries()
+    if interval:
+        try:
+            interval_sec = int(interval)
+            if interval_sec <= 0:
+                raise ValueError("INTERVAL_SECONDS должен быть положительным")
+        except Exception as e:
+            logger.error("Неверный INTERVAL_SECONDS: %s. Скрипт завершится.", e)
+            sys.exit(1)
 
-# Больше ничего — GitHub Actions сам перезапустит через час (по cron)
+        logger.info("Бот запущен в режиме демона. Интервал: %s секунд", interval_sec)
+        while True:
+            logger.info("Отправляю текущие уровни BTC...")
+            get_btc_levels(session=session)
+            logger.info("Жду %s секунд до следующего запуска...", interval_sec)
+            time.sleep(interval_sec)
+    else:
+        logger.info("Бот запущен — отправляю текущие уровни BTC (однократно)...")
+        get_btc_levels(session=session)
+
+if __name__ == "__main__":
+    main()
