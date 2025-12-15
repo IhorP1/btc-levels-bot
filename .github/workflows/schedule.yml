@@ -1,12 +1,12 @@
-name: BTC Signals Scheduler
+name: BTC Signals Bot
 
 on:
   schedule:
-    - cron: '0 */4 * * *'  # Каждые 4 часа (00:00, 04:00, 08:00, 12:00, 16:00, 20:00 UTC)
-  workflow_dispatch:  # Чтобы можно было запустить вручную из GitHub
+    - cron: '0 */4 * * *'  # Каждые 4 часа UTC (можно изменить)
+  workflow_dispatch:  # Для ручного запуска
 
 jobs:
-  run-script:
+  run-bot:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
